@@ -1,0 +1,24 @@
+--- a/core/tools/memory_memorize_tool.py
++++ b/core/tools/memory_memorize_tool.py
+@@ -14,6 +14,7 @@
+ from astrbot.core.astr_agent_context import AstrAgentContext
+ 
+ from ..memory_scope import is_event_memory_allowed, resolve_memory_scope
++from ..task_workspace_isolation import is_isolated, policy_denies_capture
+ from ..utils import get_persona_id
+ 
+ 
+@@ -120,6 +121,13 @@
+ 
+         try:
+             event = context.context.event
++            if is_isolated(event) or policy_denies_capture(
++                getattr(context.context, "context", None), event
++            ):
++                return _json_result(
++                    {"memorized": False,
++                     "error": "memory isolated for managed workspace"}
++                )
+             if not is_event_memory_allowed(self.config_manager, event):
+                 return _json_result(
+                     {"memorized": False, "error": "memory access is not allowed"}

@@ -1,0 +1,30 @@
+--- astrbot/core/pipeline/process_stage/follow_up.py
++++ astrbot/core/pipeline/process_stage/follow_up.py
+@@ -8,6 +8,11 @@
+ from astrbot.core.astr_agent_run_util import AgentRunner
+ from astrbot.core.platform.astr_message_event import AstrMessageEvent
+ from astrbot.core.utils.active_event_registry import active_event_registry
++
++from .follow_up_guard import binding_guard_allows
++
++# Readiness marker for the staged task-workspace binding guard.
++TASK_WORKSPACE_BINDING_GUARD_VERSION = 1
+ 
+ _ACTIVE_AGENT_RUNNERS: dict[str, AgentRunner] = {}
+ _FOLLOW_UP_ORDER_STATE: dict[str, dict[str, object]] = {}
+@@ -188,6 +193,15 @@
+         return None
+ 
+     if runner_event.get_extra("agent_stop_requested"):
++        return None
++
++    # Task-workspace binding guard: evaluated synchronously right before
++    # capture so a managed run can never capture text from another workspace.
++    if not binding_guard_allows(event, runner_event):
++        logger.info(
++            "Denied native follow-up capture: workspace binding mismatch, umo=%s",
++            event.unified_msg_origin,
++        )
+         return None
+ 
+     ticket = runner.follow_up(message_text=_event_follow_up_text(event))

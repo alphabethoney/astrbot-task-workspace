@@ -1,0 +1,96 @@
+{
+  "default_timeout_s": 600,
+  "max_timeout_s": 86400,
+  "max_output_chars": 3500,
+  "allowed_roots": [
+    "D:\\agent-workspaces"
+  ],
+  "allowed_permissions": [
+    "read-only",
+    "workspace-write"
+  ],
+  "permission_ceiling": "workspace-write",
+  "agents": {
+    "dsh": {
+      "exe": "${DSH_CLI}",
+      "args": [
+        "--profile",
+        "headless",
+        "--json",
+        "-"
+      ],
+      "kind": "dsh",
+      "default_permission": "read-only",
+      "permission_patch": {
+        "verified": true,
+        "arg": "--patch",
+        "patches": {
+          "read-only": [
+            {
+              "id": "sandbox-policy",
+              "config": {
+                "mode": "read-only",
+                "workspaceRoot": "{workspace}"
+              }
+            },
+            {
+              "id": "approval",
+              "config": {
+                "policy": "never"
+              }
+            },
+            {
+              "id": "permission",
+              "config": {
+                "defaultPreset": "runner-read-only",
+                "presets": {
+                  "runner-read-only": {
+                    "sandbox": "read-only",
+                    "approval": "never"
+                  }
+                }
+              }
+            }
+          ],
+          "workspace-write": [
+            {
+              "id": "sandbox-policy",
+              "config": {
+                "mode": "workspace-write",
+                "workspaceRoot": "{workspace}"
+              }
+            },
+            {
+              "id": "approval",
+              "config": {
+                "policy": "never"
+              }
+            },
+            {
+              "id": "permission",
+              "config": {
+                "defaultPreset": "runner-workspace-write",
+                "presets": {
+                  "runner-workspace-write": {
+                    "sandbox": "workspace-write",
+                    "approval": "never"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "codex": {
+      "exe": "${CODEX_CLI}",
+      "args": [
+        "exec",
+        "--skip-git-repo-check",
+        "-"
+      ],
+      "kind": "codex",
+      "default_permission": "read-only"
+    }
+  }
+}

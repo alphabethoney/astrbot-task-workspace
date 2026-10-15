@@ -1,0 +1,22 @@
+{
+  "ssh": {
+    "host": "192.0.2.10",
+    "port": 22,
+    "user": "bridgeuser",
+    "work_dir": "<REMOTE_RUNNER_DIR>",
+    "python": "python"
+  },
+  "poll_interval": 15,
+  "announce_interval": 30,
+  "default_permission": "read-only",
+  "default_timeout_s": 600,
+  "max_text_len": 1500,
+  "allowed_sessions": [
+    "example:FriendMessage:100000001"
+  ],
+  "ssh_timeout_s": 30,
+  "verbose": false,
+  "snapshot_path": "",
+  "stale_seconds": 600,
+  "use_task_workspace": true
+}

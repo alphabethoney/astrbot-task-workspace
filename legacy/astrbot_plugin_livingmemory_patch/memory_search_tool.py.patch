@@ -1,0 +1,24 @@
+--- a/core/tools/memory_search_tool.py
++++ b/core/tools/memory_search_tool.py
+@@ -14,6 +14,7 @@
+ 
+ from ..base.config_manager import ConfigManager
+ from ..memory_scope import is_event_memory_allowed, resolve_memory_scope
++from ..task_workspace_isolation import is_isolated, policy_denies_capture
+ from ..utils import get_persona_id
+ 
+ 
+@@ -99,6 +100,13 @@
+ 
+         try:
+             event = context.context.event
++            if is_isolated(event) or policy_denies_capture(
++                getattr(context.context, "context", None), event
++            ):
++                return _json_result(
++                    {"query": cleaned_query, "count": 0, "results": [],
++                     "error": "memory isolated for managed workspace"}
++                )
+             if not is_event_memory_allowed(self.config_manager, event):
+                 return _json_result(
+                     {

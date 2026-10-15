@@ -1,0 +1,33 @@
+{
+  "enabled": true,
+  "allowed_sessions": [
+    "example:FriendMessage:100000001"
+  ],
+  "require_admin_private": true,
+  "max_global_runs": 2,
+  "default_permission": "read-only",
+  "default_timeout_s": 600,
+  "default_executor": "dsh",
+  "workspace_persona": "ops",
+  "workspace_root": "D:\\agent-workspaces",
+  "context_max_chars": 6000,
+  "result_max_chars": 4000,
+  "notify_interval": 10,
+  "poll_interval": 15,
+  "announce_interval": 30,
+  "max_text_len": 1500,
+  "verbose": false,
+  "require_native_guard": true,
+  "require_legacy_handoff": true,
+  "managed_chat_allowed_tools": [],
+  "ssh": {
+    "host": "192.0.2.10",
+    "port": 22,
+    "user": "bridgeuser",
+    "work_dir": "<REMOTE_RUNNER_DIR>",
+    "python": "python",
+    "timeout_s": 30,
+    "known_hosts": "<KNOWN_HOSTS_PATH>",
+    "host_key_policy": "reject"
+  }
+}

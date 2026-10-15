@@ -1,0 +1,81 @@
+--- a/main.py
++++ b/main.py
+@@ -9,7 +9,7 @@
+ from importlib import metadata as importlib_metadata
+ from typing import Any
+ 
+-from astrbot.api import logger
++from astrbot.api import logger, sp
+ from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
+ from astrbot.api.event.filter import PermissionType, permission_type
+ from astrbot.api.provider import LLMResponse, ProviderRequest
+@@ -26,6 +26,11 @@
+ from .core.passive_group_capture import is_plugin_enabled_for_session
+ from .core.passive_group_capture import is_session_enabled
+ from .core.passive_group_capture import set_active_plugin
++from .core.task_workspace_isolation import advertise as _advertise_isolation
++from .core.task_workspace_isolation import is_isolated as _is_memory_isolated
++from .core.task_workspace_isolation import policy_denies_capture as _policy_denies_capture
++from .core.task_workspace_isolation import publish_live as _publish_live_isolation
++from .core.task_workspace_isolation import revoke_live as _revoke_live_isolation
+ from .core.plugin_initializer import PluginInitializer
+ from .core.tools import MemoryMemorizeTool, MemorySearchTool
+ from .core.utils import get_persona_id
+@@ -123,6 +128,7 @@
+         self._component_init_lock = asyncio.Lock()
+         self._llm_tools_registered = False
+         self._terminating = False
++        self._isolation_ready = False
+ 
+         self.page_api = None
+         set_active_plugin(self)
+@@ -172,10 +178,19 @@
+             success = await self.initializer.initialize()
+ 
+             if success:
+-                await self._ensure_runtime_components()
++                if await self._ensure_runtime_components():
++                    # Publish the isolation capability only after all runtime
++                    # components and hook guards are loaded.
++                    self._isolation_ready = True
++                    _advertise_isolation(sp)
++                    _publish_live_isolation(self.context, self)
+ 
+         except Exception as e:
+             logger.error(f"插件初始化失败: {e}", exc_info=True)
++
++    def memory_isolation_ready(self) -> bool:
++        """Live readiness marker used by the in-process capability registry."""
++        return bool(getattr(self, "_isolation_ready", False)) and not self._terminating
+ 
+     async def _ensure_runtime_components(self) -> bool:
+         """确保运行期组件（事件/命令处理器、WebUI）已就绪"""
+@@ -352,6 +367,9 @@
+         if not self.event_handler:
+             return
+ 
++        if _is_memory_isolated(event) or _policy_denies_capture(self.context, event):
++            return
++
+         if await self._persona_skipped(event):
+             return
+ 
+@@ -368,6 +386,9 @@
+             return
+ 
+         if not self.event_handler:
++            return
++
++        if _is_memory_isolated(event) or _policy_denies_capture(self.context, event):
+             return
+ 
+         if await self._persona_skipped(event):
+@@ -596,6 +617,8 @@
+         """Cleanup logic when plugin stops"""
+         logger.info("LivingMemory 插件正在停止...")
+         self._terminating = True
++        self._isolation_ready = False
++        _revoke_live_isolation(self.context, self)
+         if get_active_plugin() is self:
+             set_active_plugin(None)
+ 

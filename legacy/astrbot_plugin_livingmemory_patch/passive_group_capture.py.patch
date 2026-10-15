@@ -1,0 +1,22 @@
+--- a/core/passive_group_capture.py
++++ b/core/passive_group_capture.py
+@@ -9,6 +9,7 @@
+ from astrbot.api.platform import MessageType
+ 
+ from .memory_scope import is_event_memory_allowed
++from .task_workspace_isolation import is_isolated, policy_denies_capture
+ 
+ SESSION_PLUGIN_NAMES = ("LivingMemory", "astrbot_plugin_livingmemory")
+ _ACTIVE_PLUGIN_REF: weakref.ReferenceType | None = None
+@@ -137,6 +138,11 @@
+         if not self._passes_global_whitelist(event, cfg):
+             return False
+ 
++        # Consult the same idempotent managed-workspace policy as the
++        # task-workspace early filter, independent of handler priority.
++        if is_isolated(event) or policy_denies_capture(plugin.context, event):
++            return False
++
+         if not is_event_memory_allowed(plugin.config_manager, event):
+             return False
+ 
