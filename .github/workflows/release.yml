@@ -2,6 +2,10 @@ name: Publish sanitized source release
 
 on:
   push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/release.yml'
     tags:
       - 'v*.*.*'
   workflow_dispatch:
@@ -15,14 +19,16 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
+  group: release-${{ inputs.tag || (github.ref_type == 'tag' && github.ref_name) || 'v1.1.1' }}
   cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     env:
-      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      # Bootstrap publishing when the workflow and initial tag arrive together.
+      # Future release tags still select their own immutable source directory.
+      RELEASE_TAG: ${{ inputs.tag || (github.ref_type == 'tag' && github.ref_name) || 'v1.1.1' }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
