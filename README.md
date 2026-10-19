@@ -1,4 +1,24 @@
-# astrbot task-workspace
+# AstrBot Task Workspace
+
+## Current release: v1.1.1
+
+The current matched Linux/Windows core and plugin distribution is in
+[`releases/v1.1.1/`](releases/v1.1.1/README.md). Download the source archive and
+SHA-256 sidecar from [GitHub Releases](https://github.com/alphabethoney/astrbot-task-workspace/releases/tag/v1.1.1).
+
+- [Version changes](releases/v1.1.1/CHANGELOG.md)
+- [CID, consultation windows and context/cache roadmap](releases/v1.1.1/docs/cid-context-and-cache-plan.md) — planned features, not implemented by v1.1.1.
+- [Privacy boundary](releases/v1.1.1/PRIVACY.md) and [validation](releases/v1.1.1/VALIDATION.md).
+
+The root `plugins/`, `tests/`, `config/`, and `legacy/` directories below are the
+previous implementation and supporting references, retained without rewriting
+history. Do not combine the old root plugin with the v1.1.1 core. Follow the
+release directory's installer and exact compatibility checks. Existing Windows
+runner and LivingMemory patch references remain available under `legacy/`;
+the source archive does not bundle or automatically install them.
+
+## Previous implementation reference
+
 
 Source snapshot for a persistent-session task workspace on top of AstrBot,
 plus the runner, bridge, and memory-isolation patches it depends on. This tree

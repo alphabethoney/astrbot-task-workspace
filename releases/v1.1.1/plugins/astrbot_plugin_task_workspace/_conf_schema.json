@@ -1,0 +1,166 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "是否启用任务工作区（默认关闭，fail-closed；未启用时所有命令显式报错，不回退旧路径）",
+    "default": false
+  },
+  "allowed_sessions": {
+    "type": "list",
+    "description": "允许使用任务工作区的会话（unified_msg_origin，包含匹配）。默认为空即全部拒绝；必须显式填充可信 UMO 后才可执行/管理",
+    "default": []
+  },
+  "require_admin_private": {
+    "type": "bool",
+    "description": "是否要求管理员且私聊（强烈建议开启）",
+    "default": true
+  },
+  "max_global_runs": {
+    "type": "int",
+    "description": "全局同时执行的任务数上限",
+    "default": 2
+  },
+  "default_permission": {
+    "type": "string",
+    "description": "默认权限档（首版默认只读，验证目录后再放开）",
+    "default": "workspace-write",
+    "options": [
+      "read-only",
+      "workspace-write",
+      "danger-full-access"
+    ]
+  },
+  "default_timeout_s": {
+    "type": "int",
+    "description": "任务默认超时（秒）",
+    "default": 600
+  },
+  "default_executor": {
+    "type": "string",
+    "description": "默认执行器",
+    "default": "dsh",
+    "options": [
+      "dsh",
+      "codex"
+    ]
+  },
+  "workspace_persona": {
+    "type": "string",
+    "description": "管理工作区强制使用的人格（作为记忆隔离策略的一部分）",
+    "default": "运维"
+  },
+  "workspace_root": {
+    "type": "string",
+    "description": "远端工作区根目录（留空则使用 ssh.work_dir）",
+    "default": ""
+  },
+  "context_max_chars": {
+    "type": "int",
+    "description": "运行输入快照最大字符数（超出会截断并显式告知）",
+    "default": 6000
+  },
+  "result_max_chars": {
+    "type": "int",
+    "description": "注入回会话的结果最大字符数",
+    "default": 4000
+  },
+  "notify_interval": {
+    "type": "int",
+    "description": "通知重试轮询间隔（秒）",
+    "default": 10
+  },
+  "poll_interval": {
+    "type": "int",
+    "description": "远端任务轮询间隔（秒）",
+    "default": 15
+  },
+  "announce_interval": {
+    "type": "int",
+    "description": "进度播报限频间隔（秒）",
+    "default": 30
+  },
+  "max_text_len": {
+    "type": "int",
+    "description": "单条播报最大字符数",
+    "default": 1500
+  },
+  "verbose": {
+    "type": "bool",
+    "description": "是否播报更多细节",
+    "default": false
+  },
+  "require_native_guard": {
+    "type": "bool",
+    "description": "是否要求已加载原生 follow-up 绑定守卫（staged core patch）后才允许执行；未加载时按保守策略拒绝",
+    "default": false
+  },
+  "require_legacy_handoff": {
+    "type": "bool",
+    "description": "迁移旧桥时要求先完成持久化并回读验证的轮询权交接后才允许新执行；独立安装默认关闭，缺失交接状态在开启时拒绝",
+    "default": false
+  },
+  "managed_chat_allowed_tools": {
+    "type": "list",
+    "description": "管理会话（原生讨论）默认拒绝的原生工具白名单：留空=不向管理会话暴露任何工具，模型只讨论与消费结果，真正执行必须显式 /task run；日常会话不受影响",
+    "default": []
+  },
+  "ssh": {
+    "type": "object",
+    "description": "SSH 连接参数（目标 Windows 桥）",
+    "items": {
+      "host": {
+        "type": "string",
+        "description": "目标主机地址",
+        "default": ""
+      },
+      "port": {
+        "type": "int",
+        "description": "SSH 端口",
+        "default": 22
+      },
+      "user": {
+        "type": "string",
+        "description": "SSH 用户名",
+        "default": ""
+      },
+      "work_dir": {
+        "type": "string",
+        "description": "远端工作目录（runner.py 所在目录）",
+        "default": ""
+      },
+      "python": {
+        "type": "string",
+        "description": "远端 Python 解释器命令",
+        "default": "python"
+      },
+      "timeout_s": {
+        "type": "int",
+        "description": "单次 SSH 调用超时（秒）",
+        "default": 30
+      },
+      "known_hosts": {
+        "type": "string",
+        "description": "known_hosts 文件路径（留空则使用系统 known_hosts）",
+        "default": ""
+      },
+      "host_key_policy": {
+        "type": "string",
+        "description": "主机密钥策略：reject（默认，拒绝未知主机）或 auto（显式接受，不推荐）",
+        "default": "reject",
+        "options": [
+          "reject",
+          "auto"
+        ]
+      }
+    }
+  },
+  "linux_cwd": {
+    "type": "string",
+    "description": "Linux 本机窗口目录；留空使用服务工作目录（不限制服务账户可访问范围）",
+    "default": ""
+  },
+  "linux_max_runs": {
+    "type": "int",
+    "description": "Linux 活跃执行（含后台进程）全局上限",
+    "default": 2
+  }
+}

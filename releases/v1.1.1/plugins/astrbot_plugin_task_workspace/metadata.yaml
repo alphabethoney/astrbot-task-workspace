@@ -1,0 +1,8 @@
+name: astrbot_plugin_task_workspace
+display_name: 任务工作区
+desc: 以持久会话为工作区、以 SQLite 为状态、以桥协议为执行适配的任务工作区；/task 管理，记忆隔离按能力握手 fail-closed
+version: v1.1.1
+author: alphabethoney
+repo: ""
+support_platforms:
+  - aiocqhttp

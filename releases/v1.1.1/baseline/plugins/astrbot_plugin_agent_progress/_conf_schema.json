@@ -1,0 +1,57 @@
+{
+  "target_session": {
+    "type": "string",
+    "description": "只播报这个会话（做精确匹配），留空表示所有会话都播报",
+    "default": ""
+  },
+  "start_after": {
+    "type": "int",
+    "description": "任务耗时超过这个秒数才开始播报，避免短回复被刷屏",
+    "default": 30
+  },
+  "interval": {
+    "type": "int",
+    "description": "两条播报之间至少间隔多少秒",
+    "default": 30
+  },
+  "show_result": {
+    "type": "bool",
+    "description": "任务收尾时是否补一条汇总（尽量附上答案摘要与 Token 用量）",
+    "default": true
+  },
+  "quiet_mode": {
+    "type": "bool",
+    "description": "安静模式：只报异常、卡住和结束，不报阶段切换",
+    "default": false
+  },
+  "phase_min_interval": {
+    "type": "int",
+    "description": "阶段切换判定阈值：距上次播报切换不足这么多秒则不重复报",
+    "default": 5
+  },
+  "stuck_timeout": {
+    "type": "int",
+    "description": "超过这么多秒没有任何新事件就报一条疑似卡住",
+    "default": 120
+  },
+  "enable_interval_report": {
+    "type": "bool",
+    "description": "是否启用旧的按时间间隔刷进度（默认关闭，交由阶段/异常/卡住/结束播报）",
+    "default": false
+  },
+  "result_answer_min_len": {
+    "type": "int",
+    "description": "答案短于这么多字符时，收尾汇总里不附「答案：」一行，避免与真实回复重复",
+    "default": 80
+  },
+  "result_min_steps": {
+    "type": "int",
+    "description": "收尾汇总门槛：任务步数达到这么多就发汇总",
+    "default": 3
+  },
+  "result_min_seconds": {
+    "type": "int",
+    "description": "收尾汇总门槛：任务耗时达到这么多秒就发汇总",
+    "default": 30
+  }
+}

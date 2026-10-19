@@ -1,0 +1,1277 @@
+--- a/astrbot_plugin_agent_progress/main.py
++++ b/astrbot_plugin_agent_progress/main.py
+@@ -435,6 +435,7 @@
+                 st["umo"],
+                 f"疑似卡住：已 {_fmt(idle)} 没有新动静，"
+                 f"最后在做「{st['last_tool'] or '未知'}」",
++                st.get("window_label", ""),
+             )
+ 
+     async def _handle(self, entry: dict):
+@@ -450,7 +451,15 @@
+             return
+         if action == ACTION_PREPARE:
+             self._sweep(now)
++            fields = entry.get(FIELD_FIELDS) or {}
++            window = fields.get("workspace") or {}
++            if window.get("environment") == "windows_remote":
++                return
+             self._spans[span] = self._new_span(umo, now)
++            self._spans[span]["window_label"] = (
++                f"[Linux · {window.get('title', '')} · {window.get('execution_id', '')[:14]}] "
++                if window.get("environment") == "linux_local" else ""
++            )
+             return
+         st = self._spans.get(span)
+         if st is None:
+@@ -477,6 +486,7 @@
+                     await self._say(
+                         st["umo"],
+                         _result_summary(st, fields, now, self.result_answer_min_len),
++                        st.get("window_label", ""),
+                     )
+ 
+     def _new_span(self, umo: str, now: float) -> dict:
+@@ -529,7 +539,7 @@
+                 f"阶段：从「{_category_cn(prev)}」切换到「{_category_cn(category)}」，"
+                 f"当前工具「{st['last_tool']}」，第 {st['steps']} 步，累计 {_fmt(elapsed)}"
+             )
+-        await self._say(umo, text)
++        await self._say(umo, text, st.get("window_label", ""))
+         return True
+ 
+     async def _report_interval(self, st: dict, umo: str, now: float):
+@@ -547,6 +557,7 @@
+             umo,
+             f"进度：已执行 {st['steps']} 步，当前在做「{st['last_tool']}」，"
+             f"累计 {_fmt(elapsed)}",
++            st.get("window_label", ""),
+         )
+ 
+     # ---------------- 异常 ----------------
+@@ -560,6 +571,7 @@
+             st["umo"],
+             f"异常：工具「{st['last_tool'] or '未知'}」返回错误："
+             f"{_truncate(text, ERROR_PREVIEW_LEN)}",
++            st.get("window_label", ""),
+         )
+ 
+     def _sweep(self, now: float):
+@@ -567,7 +579,8 @@
+         for span in stale:
+             self._spans.pop(span, None)
+ 
+-    async def _say(self, umo: str, text: str):
++    async def _say(self, umo: str, text: str, label: str = ""):
++        text = label + text
+         """回发到触发这条任务的那个会话本身。"""
+         if not umo:
+             logger.info("[进度播报] 事件里没有会话信息，未播报（内容 %d 字）", len(text))
+--- a/astrbot_plugin_agent_progress/metadata.yaml
++++ b/astrbot_plugin_agent_progress/metadata.yaml
+@@ -1,7 +1,7 @@
+ name: astrbot_plugin_agent_progress
+ display_name: agent进度播报
+ desc: 订阅 AstrBot 内部 trace 事件，把 agent 干活的关键节点发到聊天，不经过大模型，零 token 成本
+-version: v1.0.0
++version: v1.1.1
+ author: alphabethoney
+ repo: ""
+ support_platforms:
+--- a/astrbot_plugin_bridge_server/metadata.yaml
++++ b/astrbot_plugin_bridge_server/metadata.yaml
+@@ -1,7 +1,7 @@
+ name: astrbot_plugin_bridge_server
+ display_name: 桥服务器端插件
+ desc: 通过 SSH 调用 Windows 端 runner.py，把 /wg /wc /wl /ww /wx 聊天指令转成对远端 CLI agent 的提交、查看、取消，并轮询事件播报进度
+-version: v1.0.0
++version: v1.1.1
+ author: alphabethoney
+ repo: ""
+ support_platforms:
+--- a/astrbot_plugin_task_workspace/_conf_schema.json
++++ b/astrbot_plugin_task_workspace/_conf_schema.json
+@@ -22,8 +22,12 @@
+   "default_permission": {
+     "type": "string",
+     "description": "默认权限档（首版默认只读，验证目录后再放开）",
+-    "default": "read-only",
+-    "options": ["read-only", "workspace-write", "danger-full-access"]
++    "default": "workspace-write",
++    "options": [
++      "read-only",
++      "workspace-write",
++      "danger-full-access"
++    ]
+   },
+   "default_timeout_s": {
+     "type": "int",
+@@ -34,7 +38,10 @@
+     "type": "string",
+     "description": "默认执行器",
+     "default": "dsh",
+-    "options": ["dsh", "codex"]
++    "options": [
++      "dsh",
++      "codex"
++    ]
+   },
+   "workspace_persona": {
+     "type": "string",
+@@ -139,8 +146,21 @@
+         "type": "string",
+         "description": "主机密钥策略：reject（默认，拒绝未知主机）或 auto（显式接受，不推荐）",
+         "default": "reject",
+-        "options": ["reject", "auto"]
++        "options": [
++          "reject",
++          "auto"
++        ]
+       }
+     }
++  },
++  "linux_cwd": {
++    "type": "string",
++    "description": "Linux 本机窗口目录；留空使用服务工作目录（不限制服务账户可访问范围）",
++    "default": ""
++  },
++  "linux_max_runs": {
++    "type": "int",
++    "description": "Linux 活跃执行（含后台进程）全局上限",
++    "default": 2
+   }
+ }
+--- a/astrbot_plugin_task_workspace/binding.py
++++ b/astrbot_plugin_task_workspace/binding.py
+@@ -21,14 +21,14 @@
+ from astrbot.api.event.filter import CustomFilter
+ 
+ BINDING_EXTRA_KEY = "_task_workspace_binding"
+-BINDING_GUARD_VERSION = 1
++BINDING_GUARD_VERSION = 2
+ POLICY_CONTEXT_ATTR = "_task_workspace_binding_policy"
+ 
+ # Name of the readiness marker the staged core patch defines *inside the
+ # imported native follow_up module*. A local constant here is not evidence that
+ # the running core actually has the synchronous pre-capture guard installed.
+ NATIVE_GUARD_MARKER = "TASK_WORKSPACE_BINDING_GUARD_VERSION"
+-SUPPORTED_NATIVE_GUARD_VERSION = 1
++SUPPORTED_NATIVE_GUARD_VERSION = 2
+ 
+ # Command tokens that must always be allowed to reach their handlers even while
+ # a cross-conversation native run is active (bridge/management execution).
+@@ -171,6 +171,9 @@
+                 "umo": field(ws, "umo", ""),
+                 "owner": field(ws, "owner_user_id", ""),
+                 "archived": int(field(ws, "archived", 0) or 0),
++                "environment": field(ws, "environment", "windows_remote"),
++                "cwd": field(ws, "cwd", ""),
++                "title": field(ws, "title", ""),
+             }
+             if not rec["cid"]:
+                 continue
+@@ -245,3 +248,11 @@
+                 pass
+         # Never wake an ordinary message: this handler stays inert.
+         return False
++
++
++def dual_runtime_ready() -> bool:
++    try:
++        from astrbot.core.workspace_runtime import RUNTIME_VERSION
++        return RUNTIME_VERSION == 2 and native_guard_status()[0]
++    except ImportError:
++        return False
+--- a/astrbot_plugin_task_workspace/bridge_compat.py
++++ b/astrbot_plugin_task_workspace/bridge_compat.py
+@@ -90,6 +90,7 @@
+     def __init__(self, manager, config):
+         self.manager = manager
+         self.config = config
++        self.native = None
+ 
+     @property
+     def available(self) -> bool:
+@@ -110,6 +111,10 @@
+                                         workspace=ws)
+                 return f"已建工作区「{ws.title}」{ws.short_id}，任务 {run.short_id} 已排队"
+             if command == "ww":
++                if self.native:
++                    local = await self.native.command(event, "status", args)
++                    if local is not None:
++                        return local
+                 result = await m.status(event, args)
+                 if isinstance(result, list):
+                     return _format_status_list(result)
+@@ -117,13 +122,18 @@
+             if command == "wl":
+                 return await self._list_runs(event)
+             if command == "wx":
++                if self.native:
++                    local = await self.native.command(event, "cancel", args)
++                    if local is not None:
++                        return local
+                 run = await m.cancel(event, args)
+                 return f"已请求取消 {run.short_id}"
+             if command == "switch":
+                 if not (args or "").strip():
+                     return await self._list_workspaces(event)
+                 ws = await m.switch(event, args)
+-                return f"已切换到工作区 {ws.short_id}「{ws.title}」"
++                from .window_policy import window_info
++                return "已切换。\n" + window_info(ws, self.config)
+             if command == "tasks":
+                 return await self._list_workspaces(event)
+             if command == "close":
+@@ -133,6 +143,8 @@
+                     if ws is None:
+                         return "当前会话不是任务工作区，请提供工作区 ID。"
+                     key = ws.id
++                if self.native:
++                    await self.native.ensure_archivable(event, key)
+                 ws = await m.archive(event, key)
+                 return f"已归档工作区 {ws.short_id}"
+             if command == "rename":
+@@ -157,7 +169,7 @@
+         lines = []
+         for w in workspaces[:20]:
+             flag = "（已归档）" if w.archived else ""
+-            lines.append(f"{w.short_id} {w.title}{flag}")
++            lines.append(f"{w.short_id} [{w.environment}] {w.title}{flag}")
+         return "任务工作区：\n" + "\n".join(lines)
+ 
+     async def _list_runs(self, event) -> str:
+@@ -167,6 +179,8 @@
+         ws = await self.manager.current_workspace(event)
+         if ws is None:
+             return "当前会话不是任务工作区。"
++        if ws.environment == "linux_local" and self.native:
++            return await self.native.command(event, "status", "")
+         runs = await self.manager.status(event)
+         if not runs:
+             return "当前工作区暂无任务。"
+@@ -188,7 +202,7 @@
+     tail = run.status
+     if run.connectivity_error:
+         tail += f" (连接异常: {run.connectivity_error[:60]})"
+-    return f"{run.short_id} [{run.executor}] {tail} {run.remote_task_id}"
++    return f"[Windows · {run.workspace_id[:9]} · {run.short_id}] [{run.executor}] {tail} {run.remote_task_id}"
+ 
+ 
+ def _format_status_list(runs) -> str:
+--- a/astrbot_plugin_task_workspace/config.py
++++ b/astrbot_plugin_task_workspace/config.py
+@@ -8,6 +8,8 @@
+ """
+ from __future__ import annotations
+ 
++from pathlib import Path
++
+ 
+ class TaskWorkspaceConfig:
+     DEFAULTS = {
+@@ -15,7 +17,7 @@
+         "allowed_sessions": [],
+         "require_admin_private": True,
+         "max_global_runs": 2,
+-        "default_permission": "read-only",
++        "default_permission": "workspace-write",
+         "default_timeout_s": 600,
+         "default_executor": "dsh",
+         "workspace_persona": "运维",
+@@ -89,7 +91,7 @@
+ 
+     @property
+     def default_permission(self) -> str:
+-        return str(self._raw("default_permission", "read-only"))
++        return str(self._raw("default_permission", "workspace-write"))
+ 
+     @property
+     def default_timeout_s(self) -> int:
+@@ -249,3 +251,11 @@
+         if not session:
+             return False
+         return session in allowed
++
++    @property
++    def linux_cwd(self) -> str:
++        return str(self._raw("linux_cwd", str(Path.cwd())))
++
++    @property
++    def linux_max_runs(self) -> int:
++        return max(1, int(self._raw("linux_max_runs", 2)))
+--- /dev/null
++++ b/astrbot_plugin_task_workspace/local_files.py
+@@ -0,0 +1,70 @@
++"""Linux transfer tools (the stock upload/download tools target a sandbox)."""
++from dataclasses import dataclass, field
++from pathlib import Path
++
++import aiohttp
++from astrbot.api import FunctionTool
++from astrbot.api.event import MessageChain
++from astrbot.core.message.components import File
++
++
++async def local_path(context, name, tool):
++    from astrbot.core.workspace_runtime import native_service, binding
++    event = context.context.event
++    await native_service(context.context.context).validate(event, tool=tool)
++    path = Path(name).expanduser()
++    if not path.is_absolute():
++        path = Path(binding(event)["cwd"]) / path
++    return path.resolve()
++
++
++@dataclass
++class LinuxDownloadTool(FunctionTool):
++    name: str = "linux_download_file"
++    description: str = "Download an HTTP(S) URL to a Linux host file. Existing files are not overwritten."
++    parameters: dict = field(default_factory=lambda: {
++        "type": "object", "properties": {
++            "url": {"type": "string", "description": "HTTP(S) file URL"},
++            "path": {"type": "string", "description": "Destination Linux path"},
++        }, "required": ["url", "path"],
++    })
++
++    async def call(self, context, url: str, path: str):
++        if not url.startswith(("http://", "https://")):
++            return "只支持 HTTP(S) 下载"
++        target = await local_path(context, path, self.name)
++        if target.exists():
++            return "目标已存在，请选择新文件名"
++        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as client:
++            async with client.get(url) as response:
++                response.raise_for_status()
++                # Exclusive creation and cleanup prevent an incomplete file
++                # from being mistaken for a completed transfer after cancel.
++                with target.open("xb") as out:
++                    try:
++                        async for chunk in response.content.iter_chunked(65536):
++                            out.write(chunk)
++                    except BaseException:
++                        target.unlink(missing_ok=True)
++                        raise
++        return f"已下载到 Linux：{target}"
++
++
++@dataclass
++class LinuxSendFileTool(FunctionTool):
++    name: str = "linux_send_file"
++    description: str = "Send a Linux host file to the owner of this private workspace conversation."
++    parameters: dict = field(default_factory=lambda: {
++        "type": "object", "properties": {"path": {"type": "string"}},
++        "required": ["path"],
++    })
++
++    async def call(self, context, path: str):
++        target = await local_path(context, path, self.name)
++        if not target.is_file():
++            return "本机文件不存在"
++        from astrbot.core.workspace_runtime import binding
++        b = binding(context.context.event)
++        await context.context.event.send(MessageChain().message(f"[Linux · {b['title']}] 文件：{target.name}"))
++        await context.context.event.send(MessageChain(chain=[File(name=target.name, file=str(target))]))
++        return f"已发送 Linux 文件：{target.name}"
+--- a/astrbot_plugin_task_workspace/main.py
++++ b/astrbot_plugin_task_workspace/main.py
+@@ -31,7 +31,6 @@
+     BINDING_GUARD_VERSION,
+     POLICY_CONTEXT_ATTR,
+     TaskWorkspaceBindingFilter,
+-    active_runner_binding,
+     get_binding,
+     looks_like_command,
+     native_guard_status,
+@@ -44,6 +43,8 @@
+ from .manager import AccessDeniedError, AmbiguousIdError, WorkspaceError, WorkspaceManager
+ from .memory_gate import MemoryGate
+ from .models import RunStatus
++from .native import NativeService
++from .window_policy import LINUX_TOOLS, window_info, capability_prompt, sanitize_dsml
+ from .notify import Notifier
+ from .store import Store
+ 
+@@ -69,9 +70,9 @@
+ class TaskWorkspace(Star):
+     _HELP_TEXT = (
+         "用法：/task new|list|switch|rename|archive|restore|run|status|"
+-        "result|amend|cancel|reconcile ...\n"
+-        "说明：工作区会话只做讨论与结果消费，不暴露本机原生执行工具，"
+-        "不会直接执行命令；真正执行必须显式发送 /task run。"
++        "result|amend|cancel|reconcile|info ...\n"
++        "/task new linux <标题>：本机自然语言执行；"
++        "/task new windows <标题>：远端 /task run 执行。"
+     )
+ 
+     def __init__(self, context: Context, config=None):
+@@ -80,6 +81,7 @@
+         self._store: Store | None = None
+         self._manager: WorkspaceManager | None = None
+         self._notifier: Notifier | None = None
++        self.native = None
+ 
+     async def initialize(self):
+         data_dir = _resolve_data_dir()
+@@ -111,7 +113,11 @@
+         )
+         self._manager.native_guard = native_guard_status
+         self._publish_handoff_gate()
+-        attach_service(self.context, TaskWorkspaceService(self._manager, self._cfg))
++        self.native = NativeService(self._manager, self.context)
++        await self.native.initialize()
++        service = TaskWorkspaceService(self._manager, self._cfg)
++        service.native = self.native
++        attach_service(self.context, service)
+         self._publish_policy()
+         set_active_plugin(self)
+         self._notifier.start()
+@@ -148,7 +154,12 @@
+         except Exception:
+             pass
+ 
++    async def can_unload(self):
++        return not (self.native and await self.native.busy())
++
+     async def terminate(self):
++        if self.native is not None:
++            await self.native.close()
+         # Cancel and await local drivers (never remote jobs) before closing the
+         # notifier/store. The store must not transparently reopen after close.
+         if self._manager is not None:
+@@ -166,10 +177,7 @@
+     async def task(self, event: AstrMessageEvent, sub: str = "", *, rest: GreedyStr):
+         """任务工作区管理入口。
+ 
+-        工作区会话只用于「讨论需求 + 查看/消费结果」，其中不向模型暴露任何
+-        本机原生执行工具（shell/python/文件写入等），因此聊天不会绕过运行
+-        账本与单次权限去直接执行。真正的执行必须由用户显式发送
+-        ``/task run`` 触发：它走远端执行器、写入运行账本并受单次权限约束。
++        Linux 窗口直接使用本机工具；Windows 窗口讨论后用 /task run 执行。
+ 
+         ``rest`` is keyword-only and has no default so AstrBot's parser uses the
+         ``GreedyStr`` annotation and preserves spaces in titles/amendments.
+@@ -185,11 +193,19 @@
+             return "任务工作区未初始化。"
+         try:
+             if sub == "new":
+-                ws = await m.create_workspace(event, rest)
+-                return (
+-                    f"已创建工作区「{ws.title}」{ws.short_id}。\n"
+-                    f"先在此会话描述需求，再 /task run 执行。"
+-                )
++                first, _, title = rest.strip().partition(" ")
++                env = {"linux": "linux_local", "windows": "windows_remote"}.get(first.lower())
++                ws = await m.create_workspace(event, title if env else rest, env or "windows_remote")
++                return "已创建工作区。\n" + window_info(ws, self._cfg)
++            if sub == "info":
++                if err := m.check_access(event):
++                    return err
++                ws = await m.current_workspace(event)
++                return window_info(ws, self._cfg) if ws else "当前不是任务工作区"
++            if sub in ("status", "result", "cancel", "reconcile", "amend"):
++                native_result = await self.native.command(event, sub, rest.strip())
++                if native_result is not None:
++                    return native_result
+             if sub == "list":
+                 err = m.check_access(event)
+                 if err:
+@@ -200,11 +216,11 @@
+                 lines = []
+                 for w in workspaces[:30]:
+                     mark = "（已归档）" if w.archived else ""
+-                    lines.append(f"{w.short_id} {w.title}{mark}")
++                    lines.append(f"{w.short_id} [{w.environment}] {w.title}{mark}")
+                 return "工作区：\n" + "\n".join(lines)
+             if sub == "switch":
+                 ws = await m.switch(event, rest)
+-                return f"已切换到工作区 {ws.short_id}「{ws.title}」"
++                return "已切换。\n" + window_info(ws, self._cfg)
+             if sub == "rename":
+                 title = rest.strip()
+                 if not title:
+@@ -221,6 +237,7 @@
+                     if ws is None:
+                         return "当前会话不是任务工作区，请提供工作区 ID。"
+                     key = ws.id
++                await self.native.ensure_archivable(event, key)
+                 ws = await m.archive(event, key)
+                 return f"已归档工作区 {ws.short_id}（历史保留）。"
+             if sub == "restore":
+@@ -273,7 +290,7 @@
+ 
+     @staticmethod
+     def _fmt_run(run) -> str:
+-        line = f"{run.short_id} [{run.executor}] {run.status}"
++        line = f"[Windows · {run.workspace_id[:9]} · {run.short_id}] [{run.executor}] {run.status}"
+         if run.remote_task_id:
+             line += f" remote={run.remote_task_id}"
+         if run.connectivity_error:
+@@ -284,12 +301,14 @@
+ 
+     async def _render_result(self, m, run) -> str:
+         text = await m.read_result(run)
++        ws = await m.store.get_workspace(run.workspace_id)
++        label = f"[Windows · {ws.title if ws else run.workspace_id} · {run.short_id}]"
+         if run.status != RunStatus.SUCCEEDED.value:
+-            head = f"任务 {run.short_id} 状态={run.status}"
++            head = f"{label} 状态={run.status}"
+             return head + (f"：{text[:500]}" if text else "")
+         if not text:
+-            return f"任务 {run.short_id} 成功，但结果为空。"
+-        return f"[{run.short_id} 结果]\n{text}"
++            return f"{label} 成功，但结果为空。"
++        return f"{label}\n{text}"
+ 
+     # --------------------------------------------------------------- hooks
+     BINDING_KEY = BINDING_EXTRA_KEY
+@@ -299,10 +318,18 @@
+         if get_binding(event) is not None:
+             return False
+         try:
++            ws = self._manager.policy.workspace_for_cid(cid) or {}
++            env = ws.get("environment", "windows_remote")
+             event.set_extra(self.BINDING_KEY, {
+                 "umo": umo, "cid": cid, "ws_id": ws_id,
+                 "owner": owner, "managed": bool(managed),
++                "environment": env, "cwd": ws.get("cwd", ""),
++                "title": ws.get("title", ""),
++                "permission": "service-account" if env == "linux_local" else self._cfg.default_permission,
++                "allowed_tools": sorted(LINUX_TOOLS) if env == "linux_local" else [],
+             })
++            if managed:
++                event.set_extra("enable_streaming", False)
+             return True
+         except Exception:
+             return False
+@@ -323,34 +350,11 @@
+                 "保守拒绝本管理请求", version)
+         return installed
+ 
+-    def _deny_managed_native_tools(self, req) -> list[str]:
+-        """Default-deny native tools on a valid managed chat request.
+-
+-        Managed workspace chat is a discussion/consumption surface: it must not
+-        expose host shell / python / file-write tools that would bypass the run
+-        ledger and per-run permission. The real execution path is an explicit
+-        ``/task run``. The ``ToolSet`` object is mutated in place (identity
+-        preserved) so the runner reset coroutine -- which captures the same
+-        ``req`` and reads ``req.func_tool`` when awaited -- sees no native
+-        tools. The global persona/config is never touched.
+-        """
+-        removed = strip_managed_chat_tools(
+-            req, allowed=self._cfg.managed_chat_allowed_tools)
+-        if removed:
+-            logger.info(
+-                "[task-workspace] 管理会话默认拒绝原生工具：%s",
+-                ", ".join(removed))
+-        return removed
+-
+     def on_adapter_message(self, event) -> None:
+-        """Synchronous early guard run during AstrBot's WakingCheckStage.
+-
+-        This executes before ``ProcessStage`` and therefore before native
+-        ``try_capture_follow_up``. It never wakes an ordinary message; the
+-        filter always returns ``False``. It (a) rejects text that a native
+-        runner bound to a *different* conversation would capture, and (b)
+-        stamps an immutable managed binding for authorized managed requests.
+-        Management/bridge commands are always allowed through.
++        """Freeze the authorized window before preprocessing or follow-up capture.
++
++        The filter does not wake messages. Core v2 uses this binding for
++        per-window runner selection, locks, tools, and history destinations.
+         """
+         m = self._manager
+         if m is None or not self._cfg.enabled:
+@@ -362,26 +366,7 @@
+         cur_cid = m.policy.current_cid(umo)
+         is_command = looks_like_command(event)
+ 
+-        # (a) Cross-conversation native runner guard.
+-        runner_binding = active_runner_binding(umo)
+-        if runner_binding and runner_binding.get("managed") and not is_command:
+-            # The synchronous pre-capture guard must actually be loaded in the
+-            # running core; without it the TOCTOU window after async
+-            # preprocessing is open, so fail closed for managed native ingress.
+-            if not self._native_guard_allows():
+-                event.stop_event()
+-                return
+-            incoming_same = (
+-                runner_binding.get("cid") == cur_cid
+-                and runner_binding.get("owner") == sender
+-                and m.policy.is_managed_cid(cur_cid)
+-            )
+-            if not incoming_same:
+-                # Let native UMO lock / request-CID guard handle normal flow;
+-                # we stop this capture instead of forwarding to the wrong run.
+-                event.stop_event()
+-                return
+-
++        # Core v2 isolates active runners and follow-ups by frozen window key.
+         kind = m.classify(event, cur_cid)
+         # (b) EVERY managed native request needs the loaded guard before it may
+         # be allowed or stamped for the LLM -- not only requests that happen to
+@@ -403,6 +388,9 @@
+             return
+ 
+         ws = m.policy.workspace_for_cid(cur_cid) or {}
++        if ws.get("archived") or m.check_access(event):
++            event.stop_event()
++            return
+         if (not sender or not ws.get("owner") or ws.get("owner") != sender):
+             if not is_command:
+                 event.stop_event()
+@@ -438,7 +426,9 @@
+         umo = str(getattr(event, "unified_msg_origin", "") or "")
+         if not self._cfg.session_allowed(umo):
+             return
+-        kind = self._manager.classify(event, self._manager.managed_cid(event))
++        frozen = get_binding(event)
++        frozen_cid = frozen.get("cid", "") if frozen else self._manager.managed_cid(event)
++        kind = self._manager.classify(event, frozen_cid)
+         if kind == "ordinary":
+             return
+         # Defense in depth: a managed native request must carry the loaded
+@@ -487,7 +477,7 @@
+ 
+     @filter.on_llm_request(priority=100)
+     async def _surface_result(self, event, req):
+-        """Default-deny native tools and inject results for a managed request.
++        """Apply the window tool profile and inject only its own remote results.
+ 
+         For a valid managed native discussion request this runs after
+         ``build_main_agent`` assembled ``req.func_tool`` but before the stage
+@@ -534,7 +524,20 @@
+         # (build_main_agent was called with apply_reset=False, so the model has
+         # not been invoked yet) and before any result injection. Ordinary daily
+         # requests never reach this branch.
+-        self._deny_managed_native_tools(req)
++        if ws.environment != binding.get("environment") or ws.archived:
++            event.stop_event()
++            return
++        if ws.environment == "linux_local":
++            from .local_files import LinuxDownloadTool, LinuxSendFileTool
++            from astrbot.core.agent.tool import ToolSet
++            if req.func_tool is None:
++                req.func_tool = ToolSet()
++            req.func_tool.add_tool(LinuxDownloadTool())
++            req.func_tool.add_tool(LinuxSendFileTool())
++        strip_managed_chat_tools(req, allowed=binding.get("allowed_tools", []))
++        req.system_prompt = (req.system_prompt or "") + "\n\n" + capability_prompt(binding)
++        if ws.environment == "linux_local":
++            return
+         try:
+             run_id, surface = await self._manager.surface_pending_result(
+                 event, workspace=ws, expected_cid=req_cid)
+--- a/astrbot_plugin_task_workspace/manager.py
++++ b/astrbot_plugin_task_workspace/manager.py
+@@ -188,10 +188,16 @@
+                 return candidate
+         raise WorkspaceError("无法分配唯一的工作区 ID 前缀")
+ 
+-    async def create_workspace(self, event, title: str) -> Workspace:
++    async def create_workspace(self, event, title: str, environment: str = "windows_remote") -> Workspace:
+         err = self.check_access(event)
+         if err:
+             raise AccessDeniedError(err)
++        if environment not in ("windows_remote", "linux_local"):
++            raise WorkspaceError("未知执行环境")
++        if environment == "linux_local":
++            from .binding import dual_runtime_ready
++            if not dual_runtime_ready():
++                raise WorkspaceError("Linux 窗口需要双窗口核心支持 v2，请先部署核心补丁")
+         title = (title or "").strip()
+         if not title:
+             raise WorkspaceError("用法：/task new <标题>")
+@@ -219,7 +225,9 @@
+         ws = Workspace(
+             id=ws_id, owner_user_id=sender, umo=umo, conversation_id=cid,
+             title=title, persona=self.config.workspace_persona,
+-            memory_policy="isolated", cwd="",
++            memory_policy="isolated",
++            cwd=self.config.linux_cwd if environment == "linux_local" else "",
++            environment=environment,
+         )
+         try:
+             await self.store.insert_workspace(ws)
+@@ -434,6 +442,8 @@
+             ws = await self.current_workspace(event)
+         if ws is None:
+             raise WorkspaceError("当前会话不是任务工作区，请先 /task new 或 /task switch。")
++        if ws.environment != "windows_remote":
++            raise WorkspaceError("当前是 Linux 窗口，请直接描述本机操作；远端任务请切换 Windows 窗口。")
+         if ws.archived:
+             raise WorkspaceError("该工作区已归档，请先 /task restore。")
+         if await self.persona_conflict(ws.umo, self.config.workspace_persona):
+@@ -464,6 +474,8 @@
+                 pending_amendments=[p.text for p in pending], prior_result=prior,
+                 max_chars=self.config.context_max_chars,
+             )
++            snapshot["permission"] = self.config.default_permission
++            snapshot["environment"] = ws.environment
+             request_id = _new_id("req_")
+             run = Run(
+                 id=_new_id("run_"), workspace_id=ws.id, executor=executor,
+@@ -544,7 +556,7 @@
+             prompt = parse_snapshot(run.input_snapshot).get("prompt", "")
+             try:
+                 task_id = await self.executor.submit(
+-                    run.request_id, prompt, cwd, self.config.default_permission,
++                    run.request_id, prompt, cwd, parse_snapshot(run.input_snapshot).get("permission", "read-only"),
+                     self.config.default_timeout_s, run.executor,
+                 )
+             except ExecutorError as e:
+@@ -641,18 +653,18 @@
+                         request_id=run.request_id, input_snapshot=run.input_snapshot,
+                         status=status),
+                 result_text, self.config.result_max_chars)
+-            outbox.append(self._outbox(run, f"terminal:{status}", ws.umo, summary))
++            outbox.append(self._outbox(run, f"terminal:{status}", ws.umo, summary, title=ws.title))
+         elif status == RunStatus.CANCELLED.value:
+             outbox.append(self._outbox(run, "cancelled", ws.umo,
+-                                       f"任务 {run.short_id} 已取消。"))
++                                       f"任务 {run.short_id} 已取消。", title=ws.title))
+         return await self.store.finalize_run(
+             run.id, status, result_text, json.dumps(artifacts, ensure_ascii=False),
+             outbox, error=error, connectivity_error=connectivity_error,
+         )
+ 
+-    def _outbox(self, run: Run, key: str, session: str, content: str) -> OutboxItem:
++    def _outbox(self, run: Run, key: str, session: str, content: str, *, title: str = "") -> OutboxItem:
+         return OutboxItem(id=None, run_id=run.id, event_key=key, session=session,
+-                          content=content, created_ts=now())
++                          content=f"[Windows · {title or run.workspace_id[:9]} · {run.short_id}]\n" + content, created_ts=now())
+ 
+     async def _result_text(self, run: Run) -> str:
+         if run.result_text:
+@@ -670,7 +682,9 @@
+     async def _notify(self, run: Run, event_key: str, session: str, content: str) -> None:
+         if not session:
+             return
+-        await self.notifier.enqueue(run.id, event_key, session, content)
++        ws = await self.store.get_workspace(run.workspace_id)
++        label = f"[Windows · {ws.title if ws else run.workspace_id} · {run.short_id}]\n"
++        await self.notifier.enqueue(run.id, event_key, session, label + content)
+ 
+     # -------------------------------------------------------------- recovery
+     async def resume_active_runs(self) -> None:
+@@ -767,14 +781,29 @@
+             await self._poll_until_terminal(await self.store.get_run(run_id), ws)
+ 
+     # -------------------------------------------------------------- queries
++    async def _owned_remote_target(self, event, key):
++        if not key or not key.startswith("run_"):
++            return None
++        matches = await self.store.owned_runs_by_prefix(self._umo(event), self._sender(event), key)
++        exact = [r for r in matches if r.id == key]
++        matches = exact or matches
++        if len(matches) != 1:
++            raise WorkspaceError("远端任务 ID 不存在、无权访问或前缀不唯一")
++        run = matches[0]
++        ws = await self.store.get_workspace(run.workspace_id)
++        if not self._authorize_workspace(ws, event):
++            raise AccessDeniedError("无权管理此任务")
++        return ws, run
++
+     async def cancel(self, event, run_key: str = "") -> Run:
+         err = self.check_access(event)
+         if err:
+             raise AccessDeniedError(err)
+-        ws = await self.current_workspace(event)
++        target = await self._owned_remote_target(event, run_key)
++        ws = target[0] if target else await self.current_workspace(event)
+         if ws is None:
+             raise WorkspaceError("当前会话不是任务工作区。")
+-        run = await self._resolve_run(event, ws, run_key)
++        run = target[1] if target else await self._resolve_run(event, ws, run_key)
+         if run.status not in ACTIVE:
+             raise WorkspaceError(f"任务 {run.short_id} 已是终态（{run.status}），无需取消。")
+         await self.store.update_run(run.id, status=RunStatus.CANCEL_REQUESTED.value,
+@@ -807,21 +836,23 @@
+         err = self.check_access(event)
+         if err:
+             raise AccessDeniedError(err)
+-        ws = await self.current_workspace(event)
++        target = await self._owned_remote_target(event, run_key)
++        ws = target[0] if target else await self.current_workspace(event)
+         if ws is None:
+             raise WorkspaceError("当前会话不是任务工作区。")
+         if run_key:
+-            return await self._resolve_run(event, ws, run_key)
++            return target[1] if target else await self._resolve_run(event, ws, run_key)
+         return await self.store.list_runs(ws.id, limit=20)
+ 
+     async def reconcile(self, event, run_key: str = "") -> Run:
+         err = self.check_access(event)
+         if err:
+             raise AccessDeniedError(err)
+-        ws = await self.current_workspace(event)
++        target = await self._owned_remote_target(event, run_key)
++        ws = target[0] if target else await self.current_workspace(event)
+         if ws is None:
+             raise WorkspaceError("当前会话不是任务工作区。")
+-        run = await self._resolve_run(event, ws, run_key)
++        run = target[1] if target else await self._resolve_run(event, ws, run_key)
+         if run.status != RunStatus.NEEDS_RECONCILIATION.value:
+             return run
+         try:
+--- a/astrbot_plugin_task_workspace/metadata.yaml
++++ b/astrbot_plugin_task_workspace/metadata.yaml
+@@ -1,7 +1,7 @@
+ name: astrbot_plugin_task_workspace
+ display_name: 任务工作区
+ desc: 以持久会话为工作区、以 SQLite 为状态、以桥协议为执行适配的任务工作区；/task 管理，记忆隔离按能力握手 fail-closed
+-version: v1.0.0
++version: v1.1.1
+ author: alphabethoney
+ repo: ""
+ support_platforms:
+--- a/astrbot_plugin_task_workspace/models.py
++++ b/astrbot_plugin_task_workspace/models.py
+@@ -69,6 +69,7 @@
+     created_ts: float = field(default_factory=now)
+     updated_ts: float = field(default_factory=now)
+     archived: int = 0
++    environment: str = "windows_remote"
+ 
+     @property
+     def short_id(self) -> str:
+--- /dev/null
++++ b/astrbot_plugin_task_workspace/native.py
+@@ -0,0 +1,299 @@
++"""Native execution ledger and per-window lifecycle, separate from remote runs."""
++from __future__ import annotations
++
++import asyncio
++import time
++import uuid
++
++from astrbot.api import logger
++
++from .binding import get_binding
++from .window_policy import LINUX_TOOLS, sanitize_dsml, capability_prompt
++
++ACTIVE = ("running", "background", "cancel_requested")
++
++
++class NativeLedger:
++    def __init__(self, store):
++        self.store = store
++
++    async def query(self, sql, params=()):
++        def run():
++            with self.store._lock:
++                return [dict(r) for r in self.store._connect().execute(sql, params).fetchall()]
++        return await asyncio.to_thread(run)
++
++    async def reserve(self, ws, scope, maximum):
++        def run():
++            with self.store._lock:
++                c = self.store._connect()
++                c.execute("BEGIN IMMEDIATE")
++                try:
++                    current = c.execute("SELECT archived,environment FROM workspaces WHERE id=?", (ws.id,)).fetchone()
++                    if current is None or current["archived"] or current["environment"] != "linux_local":
++                        raise RuntimeError("Linux 工作区已归档或不存在")
++                    count = c.execute("SELECT count(*) FROM native_executions WHERE status IN ('running','background','cancel_requested')").fetchone()[0]
++                    if count >= maximum:
++                        raise RuntimeError("Linux 全局活跃任务已达上限，请先查看 /task status")
++                    if c.execute("SELECT 1 FROM native_executions WHERE workspace_id=? AND status IN ('running','background','cancel_requested')", (ws.id,)).fetchone():
++                        raise RuntimeError("该 Linux 窗口仍有任务或后台进程，请先等待或 /task cancel")
++                    rid = "local_" + uuid.uuid4().hex
++                    c.execute("INSERT INTO native_executions(id,workspace_id,owner,scope,status,created_ts) VALUES(?,?,?,?,?,?)", (rid, ws.id, ws.owner_user_id, scope + ":" + rid, "running", time.time()))
++                    c.execute("COMMIT")
++                    return rid
++                except BaseException:
++                    c.execute("ROLLBACK")
++                    raise
++        return await asyncio.to_thread(run)
++
++    async def finish(self, rid, status, text="", error=""):
++        await self.query("UPDATE native_executions SET status=?,result_text=?,error=?,runner_done=1,ended_ts=? WHERE id=?", (status, text, error, 0 if status in ACTIVE else time.time(), rid))
++
++
++class NativeService:
++    def __init__(self, manager, context):
++        self.manager = manager
++        self.context = context
++        self.ledger = NativeLedger(manager.store)
++        self.runners = {}
++        self.events = {}
++        self._watcher = None
++        self._lifecycle = asyncio.Lock()
++
++    async def initialize(self):
++        # No command is replayed after a process restart. Child processes may
++        # survive a crash, so report uncertainty rather than claiming failure.
++        await self.ledger.query("UPDATE native_executions SET status='interrupted',error='进程重启：执行状态待核对，未自动重放',ended_ts=? WHERE status IN ('running','background','cancel_requested')", (time.time(),))
++        self._watcher = asyncio.create_task(self._watch_background())
++
++    async def validate(self, event, *, tool=None):
++        b = get_binding(event)
++        if not b or not b.get("managed"):
++            raise RuntimeError("缺少工作区绑定")
++        m = self.manager
++        if err := m.check_access(event):
++            raise RuntimeError(err)
++        ws = await m.store.get_workspace(b.get("ws_id", ""))
++        if (not ws or ws.archived or ws.conversation_id != b.get("cid")
++                or ws.umo != b.get("umo") or ws.umo != event.unified_msg_origin
++                or ws.owner_user_id != b.get("owner") or ws.owner_user_id != m._sender(event)
++                or ws.environment != b.get("environment") or ws.cwd != b.get("cwd")):
++            raise RuntimeError("工作区冻结绑定校验失败，拒绝执行")
++        from .binding import dual_runtime_ready
++        if not dual_runtime_ready() or not m.memory_gate.detect().available:
++            raise RuntimeError("工作区核心或记忆隔离能力不可用")
++        if ws.environment == "linux_local":
++            config = self.context.get_config(umo=ws.umo)
++            if config.get("provider_settings", {}).get("computer_use_runtime", "local") != "local":
++                raise RuntimeError("Linux 窗口要求 local 运行时，不能回退到其他执行环境")
++        if tool is not None:
++            if ws.environment != "linux_local" or tool not in LINUX_TOOLS:
++                raise RuntimeError("当前窗口不允许调用该工具")
++            if tool not in b.get("allowed_tools", ()):
++                raise RuntimeError("工具不属于本次请求的能力快照")
++            rid = event.get_extra("_task_workspace_native_id")
++            rows = await self.ledger.query("SELECT status FROM native_executions WHERE id=? AND workspace_id=?", (rid, ws.id))
++            if not rows or rows[0]["status"] not in ("running", "background"):
++                raise RuntimeError("本机任务已取消或结束")
++        return ws
++
++    async def restrict_request(self, event, req):
++        """Last capability check after all plugin hooks and before model reset."""
++        ws = await self.validate(event)
++        b = get_binding(event)
++        if getattr(getattr(req, "conversation", None), "cid", "") != b["cid"]:
++            raise RuntimeError("模型请求与冻结窗口不一致")
++        from .context_builder import strip_managed_chat_tools
++        strip_managed_chat_tools(req, LINUX_TOOLS if ws.environment == "linux_local" else [])
++        prompt = capability_prompt(b)
++        if prompt not in (req.system_prompt or ""):
++            req.system_prompt = (req.system_prompt or "") + "\n\n" + prompt
++
++    async def begin(self, event, scope):
++        ws = await self.validate(event)
++        if ws.environment != "linux_local":
++            return
++        rid = await self.ledger.reserve(ws, scope, self.manager.config.linux_max_runs)
++        event.set_extra("_task_workspace_native_id", rid)
++        self.events[rid] = event
++
++    def register(self, event, runner):
++        rid = event.get_extra("_task_workspace_native_id")
++        if rid:
++            self.runners[rid] = runner
++
++    @staticmethod
++    async def sessions(scope, owner):
++        from astrbot.core.computer.computer_client import get_local_booter
++        return await get_local_booter().shell.list_sessions(owner_id=scope, requester_id=owner, requester_is_admin=True)
++
++    async def finish(self, event, response=None, error=""):
++        async with self._lifecycle:
++            await self._finish(event, response, error)
++
++    async def _finish(self, event, response=None, error=""):
++        rid = event.get_extra("_task_workspace_native_id")
++        if not rid:
++            return
++        rows = await self.ledger.query("SELECT * FROM native_executions WHERE id=?", (rid,))
++        if not rows:
++            return
++        row = rows[0]
++        self.runners.pop(rid, None)
++        text = getattr(response, "completion_text", "") or ""
++        try:
++            sessions = (await self.sessions(row["scope"], row["owner"]))["sessions"]
++        except Exception:
++            await self.ledger.finish(rid, "interrupted", text, "无法核对后台进程，需人工检查")
++            self.events.pop(rid, None)
++            return
++        cancelled = row["status"] == "cancel_requested" or bool(event.get_extra("agent_user_aborted"))
++        if cancelled or error:
++            await self._stop_sessions(row)
++        active = any(s["status"] == "running" for s in sessions) and not (cancelled or error)
++        status = "cancelled" if cancelled else "failed" if error else "background" if active else "succeeded"
++        await self.ledger.finish(rid, status, text, error)
++        if not active:
++            self.events.pop(rid, None)
++
++    async def _stop_sessions(self, row):
++        from astrbot.core.computer.computer_client import get_local_booter
++        shell = get_local_booter().shell
++        for s in (await self.sessions(row["scope"], row["owner"]))["sessions"]:
++            if s["status"] == "running":
++                await shell.terminate_session(owner_id=row["scope"], requester_id=row["owner"], requester_is_admin=True, session_id=s["session_id"])
++
++    async def _session_output(self, row):
++        from astrbot.core.computer.computer_client import get_local_booter
++        shell = get_local_booter().shell
++        parts = []
++        for item in (await self.sessions(row["scope"], row["owner"]))["sessions"]:
++            result = await shell.snapshot_session(
++                owner_id=row["scope"], requester_id=row["owner"], requester_is_admin=True,
++                session_id=item["session_id"],
++                max_output_chars=self.manager.config.result_max_chars,
++            )
++            parts.append(f"Shell {item['session_id']} [{item['status']}]\n{result.get('stdout', '')}")
++        return "\n".join(parts)
++
++    async def _watch_background(self):
++        while True:
++            await asyncio.sleep(2)
++            try:
++                rows = await self.ledger.query("SELECT * FROM native_executions WHERE status='background'")
++                for row in rows:
++                    async with self._lifecycle:
++                        await self._finish_background(row["id"])
++            except asyncio.CancelledError:
++                raise
++            except Exception:
++                logger.warning("[task-workspace] 本机后台状态核对失败", exc_info=True)
++
++    async def _finish_background(self, rid):
++        row = (await self.ledger.query("SELECT * FROM native_executions WHERE id=?", (rid,)))[0]
++        if row["status"] != "background":
++            return
++        sessions = (await self.sessions(row["scope"], row["owner"]))["sessions"]
++        if any(s["status"] == "running" for s in sessions):
++            return
++        status = "failed" if any(s["status"] in ("failed", "timed_out") for s in sessions) else "succeeded"
++        await self.ledger.finish(rid, status, row["result_text"] + "\n" + await self._session_output(row))
++        self.events.pop(rid, None)
++        ws = await self.manager.store.get_workspace(row["workspace_id"])
++        if ws:
++            await self.manager.notifier.enqueue(rid, "background_done", ws.umo, f"[Linux · {ws.title} · {rid[:14]}] 后台进程已结束：{status}。使用 /task result 查看结果。")
++
++    async def busy(self):
++        return bool(await self.ledger.query("SELECT 1 FROM native_executions WHERE status IN ('running','background','cancel_requested') LIMIT 1"))
++
++    async def ensure_archivable(self, event, key):
++        ws = await self.manager.resolve(event, key)
++        rows = await self.ledger.query("SELECT 1 FROM native_executions WHERE workspace_id=? AND status IN ('running','background','cancel_requested')", (ws.id,))
++        if rows:
++            raise RuntimeError("Linux 窗口仍有活跃执行，不能归档")
++
++    async def command(self, event, sub, key):
++        if err := self.manager.check_access(event):
++            return err
++        ws = await self.manager.current_workspace(event)
++        if key.startswith("run_"):
++            return None  # Manager resolves explicit remote IDs by owner, independent of selection.
++        if key.startswith("local_"):
++            candidates = await self.ledger.query("SELECT * FROM native_executions WHERE substr(id,1,?)=?", (len(key), key))
++            owned = []
++            for row in candidates:
++                target = await self.manager.store.get_workspace(row["workspace_id"])
++                if target and self.manager._authorize_workspace(target, event):
++                    owned.append((row, target))
++            if len(owned) != 1:
++                return "本机执行 ID 不存在、无权访问或前缀不唯一"
++            rows, ws = [owned[0][0]], owned[0][1]
++        elif ws and ws.environment == "linux_local":
++            if key:
++                return "当前是 Linux 窗口，请提供 local_ 执行 ID；远端操作请切换 Windows 窗口"
++            rows = await self.ledger.query("SELECT * FROM native_executions WHERE workspace_id=? ORDER BY created_ts DESC LIMIT 20", (ws.id,))
++        else:
++            return None
++        if sub in ("amend", "reconcile"):
++            return "Linux 窗口请直接描述需求；中断执行需核对后重新发起，不自动重放"
++        if not rows:
++            return "当前 Linux 窗口暂无执行记录"
++        if sub == "status":
++            return "\n".join(f"[Linux · {ws.title} · {r['id'][:14]}] {r['status']} {r['error']}" for r in rows)
++        row = rows[0]
++        if sub == "result":
++            extra = await self._session_output(row) if row["status"] in ACTIVE else ""
++            return f"[Linux · {ws.title} · {row['id'][:14]}]\n" + (row["result_text"] or row["error"] or row["status"]) + ("\n" + extra if extra else "")
++        if sub == "cancel":
++            async with self._lifecycle:
++                return await self._cancel(row["id"], ws)
++        return None
++
++    async def _cancel(self, rid, ws):
++        row = (await self.ledger.query("SELECT * FROM native_executions WHERE id=?", (rid,)))[0]
++        if row["status"] not in ACTIVE:
++            return f"执行已结束：{row['status']}"
++        await self.ledger.query("UPDATE native_executions SET status='cancel_requested' WHERE id=?", (rid,))
++        ev = self.events.get(rid)
++        if ev:
++            ev.set_extra("agent_stop_requested", True)
++        runner = self.runners.get(rid)
++        if runner:
++            runner.request_stop()
++        await self._stop_sessions(row)
++        if runner is None and row["runner_done"]:
++            await self.ledger.finish(rid, "cancelled", row["result_text"])
++            self.events.pop(rid, None)
++        return f"[Linux · {ws.title} · {rid[:14]}] 已请求停止执行及其登记的后台进程"
++
++    async def close(self):
++        if self._watcher:
++            self._watcher.cancel()
++            await asyncio.gather(self._watcher, return_exceptions=True)
++
++    def sanitize(self, event, response, messages):
++        b = get_binding(event)
++        if not b or not b.get("managed") or response is None:
++            return
++        user = event.get_message_str() or ""
++        text, blocked = sanitize_dsml(response.completion_text or "", user, b["environment"])
++        if blocked:
++            logger.warning("[task-workspace] blocked textual tool call ws=%s environment=%s", b["ws_id"], b["environment"])
++            response.result_chain = None
++        label = "Linux" if b["environment"] == "linux_local" else "Windows"
++        rid = event.get_extra("_task_workspace_native_id") or "chat"
++        prefix = f"[{label} · {b['title']} · {rid[:14]}]\n"
++        response.completion_text = prefix + text
++        response.reasoning_content = None
++        event.set_extra("_llm_reasoning_content", "")
++        # Agent messages are also persisted; sanitize assistant content there,
++        # never user quotations or real tool responses.
++        for message in messages or []:
++            if getattr(message, "role", None) == "assistant":
++                content = getattr(message, "content", None)
++                if isinstance(content, str):
++                    message.content = sanitize_dsml(content, user, b["environment"])[0]
++                elif isinstance(content, list):
++                    for part in content:
++                        if getattr(part, "type", "") == "text":
++                            part.text = sanitize_dsml(part.text, user, b["environment"])[0]
+--- a/astrbot_plugin_task_workspace/requirements.txt
++++ b/astrbot_plugin_task_workspace/requirements.txt
+@@ -1 +1,2 @@
+ paramiko>=2.12
++aiohttp>=3.9
+--- a/astrbot_plugin_task_workspace/store.py
++++ b/astrbot_plugin_task_workspace/store.py
+@@ -143,6 +143,16 @@
+     ),
+ ]
+ 
++MIGRATIONS.append((3, [
++    "ALTER TABLE workspaces ADD COLUMN environment TEXT NOT NULL DEFAULT 'windows_remote' CHECK(environment IN ('windows_remote','linux_local'))",
++    """CREATE TABLE native_executions (
++        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, owner TEXT NOT NULL,
++        scope TEXT NOT NULL, status TEXT NOT NULL, result_text TEXT NOT NULL DEFAULT '',
++        created_ts REAL NOT NULL, ended_ts REAL NOT NULL DEFAULT 0,
++        runner_done INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '')""",
++    "CREATE UNIQUE INDEX native_one_active ON native_executions(workspace_id) WHERE status IN ('running','background','cancel_requested')",
++]))
++
+ SCHEMA_VERSION = MIGRATIONS[-1][0]
+ 
+ _TERMINAL_PLACEHOLDERS = ",".join("?" for _ in TERMINAL)
+@@ -232,11 +242,11 @@
+                 conn.execute(
+                     "INSERT INTO workspaces(id, id_prefix, owner_user_id, umo, "
+                     "conversation_id, title, persona, memory_policy, cwd, "
+-                    "created_ts, updated_ts, archived) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
++                    "created_ts, updated_ts, archived, environment) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (
+                         ws.id, ws.id[:9], ws.owner_user_id, ws.umo,
+                         ws.conversation_id, ws.title, ws.persona, ws.memory_policy,
+-                        ws.cwd, ws.created_ts, ws.updated_ts, ws.archived,
++                        ws.cwd, ws.created_ts, ws.updated_ts, ws.archived, ws.environment,
+                     ),
+                 )
+                 conn.execute("COMMIT")
+@@ -254,7 +264,7 @@
+             conversation_id=row["conversation_id"], title=row["title"],
+             persona=row["persona"], memory_policy=row["memory_policy"],
+             cwd=row["cwd"], created_ts=row["created_ts"], updated_ts=row["updated_ts"],
+-            archived=row["archived"],
++            archived=row["archived"], environment=row["environment"],
+         )
+ 
+     def _get_workspace_sync(self, ws_id: str) -> Workspace | None:
+@@ -318,6 +328,10 @@
+         with self._lock:
+             conn.execute("BEGIN IMMEDIATE")
+             try:
++                if fields.get("archived") and conn.execute(
++                    "SELECT 1 FROM native_executions WHERE workspace_id=? AND status IN ('running','background','cancel_requested')", (ws_id,)
++                ).fetchone():
++                    raise ValueError("Linux 窗口有活跃执行，不能归档")
+                 conn.execute(f"UPDATE workspaces SET {cols}, updated_ts = ? WHERE id = ?", vals)
+                 conn.execute("COMMIT")
+             except Exception:
+@@ -325,6 +339,8 @@
+                 raise
+ 
+     async def update_workspace(self, ws_id: str, **fields) -> None:
++        if "environment" in fields:
++            raise ValueError("工作区环境创建后不可更改")
+         await asyncio.to_thread(self._update_workspace_sync, ws_id, fields)
+ 
+     # ------------------------------------------------------------------ runs
+@@ -825,3 +841,14 @@
+ 
+     async def meta_set(self, key: str, value: str) -> None:
+         await asyncio.to_thread(self._meta_set_sync, key, value)
++
++    async def owned_runs_by_prefix(self, umo: str, owner: str, key: str) -> list[Run]:
++        def query():
++            with self._lock:
++                rows = self._connect().execute(
++                    "SELECT r.* FROM runs r JOIN workspaces w ON w.id=r.workspace_id "
++                    "WHERE w.umo=? AND w.owner_user_id=? AND w.environment='windows_remote' "
++                    "AND substr(r.id,1,?)=?", (umo, owner, len(key), key),
++                ).fetchall()
++                return [self._run_from_row(row) for row in rows]
++        return await asyncio.to_thread(query)
+--- /dev/null
++++ b/astrbot_plugin_task_workspace/window_policy.py
+@@ -0,0 +1,52 @@
++"""Window capabilities and presentation. No execution from generated text."""
++from __future__ import annotations
++
++import re
++
++LINUX_TOOLS = frozenset({
++    "astrbot_execute_shell", "astrbot_execute_python", "astrbot_shell_session",
++    "astrbot_file_read_tool", "astrbot_file_write_tool", "astrbot_file_edit_tool",
++    "astrbot_grep_tool", "linux_download_file", "linux_send_file",
++})
++
++
++def window_info(ws, config) -> str:
++    linux = ws.environment == "linux_local"
++    return (
++        f"[{'Linux' if linux else 'Windows'} · {ws.title} · {ws.short_id}]\n"
++        f"执行：{'直接描述需求，调用本机工具' if linux else '/task run dsh 或 /task run codex'}\n"
++        f"目录：{ws.cwd or config.workspace_root + ' / ' + ws.id}\n"
++        f"权限：{'AstrBot 服务账户权限（不自动提权）' if linux else config.default_permission}"
++    )
++
++
++def capability_prompt(binding: dict) -> str:
++    if binding["environment"] == "linux_local":
++        return (
++            "当前窗口是 Linux 本机维护窗口。真实工具运行在 AstrBot 所在 Linux 主机，"
++            f"默认目录为 {binding['cwd']}，权限为服务账户权限。"
++            "通过本次请求提供的结构化工具接口执行；收到真实工具结果后才能报告执行成功。"
++            "不要输出 DSML/XML 来冒充调用，不要自行切换到 Windows 或调用远端桥。"
++        )
++    return (
++        "当前窗口是 Windows 远端任务讨论窗口，本次聊天没有任何本机执行工具。"
++        "你只能讨论需求及解释结果；执行需要用户发送 /task run dsh 或 /task run codex。"
++        "不要输出 DSML/XML 工具调用，不要声称已经执行命令，不要将 Linux 路径当成远端目录。"
++    )
++
++
++_DSML = re.compile(r"<\s*[｜|]{2}DSML[｜|]{2}\s+(?:calls|invoke)\b", re.I)
++_EXPLAIN = re.compile(r"解释|说明|示例|举例|格式|语法|什么|为何|为什么|含义|分析|展示|引用|explain|example|syntax|quote|what", re.I)
++
++
++def sanitize_dsml(text: str, user_text: str, environment: str) -> tuple[str, bool]:
++    if not _DSML.search(text or ""):
++        return text, False
++    # Only an explicit documentation request is exempt. Merely pasting an old
++    # call must not persuade the model to "execute" it again as plain text.
++    if ("DSML" in user_text.upper() or _DSML.search(user_text)) and _EXPLAIN.search(user_text):
++        # A model claiming execution despite a documentation request is not an explanation.
++        if not re.search(r"我(?:来|实际|现在|先)?执行|正在执行|已经执行|已执行|执行一下|I(?:'ll| will) (?:run|execute)", text, re.I):
++            return text, False
++    entry = "请使用 /task run dsh 或 /task run codex 提交 Windows 任务。" if environment == "windows_remote" else "请重新描述本机需求；执行必须通过真实工具接口。"
++    return "该调用未执行：模型输出了工具调用标记文本，系统没有将它作为命令执行。" + entry, True
